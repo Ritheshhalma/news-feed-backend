@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sample Feed</title>
+    <item>
+      <title>Fire breaks out at restaurant</title>
+      <link>https://example.com/articleshow/1.cms</link>
+      <description>3 rescued after fire breaks out.</description>
+      <pubDate>Mon, 24 Jun 2026 10:00:00 GMT</pubDate>
+      <category>delhi</category>
+    </item>
+    <item>
+      <title>Markets close higher</title>
+      <link>https://example.com/articleshow/2.cms</link>
+      <description>Sensex gains 200 points.</description>
+      <pubDate>Mon, 24 Jun 2026 11:00:00 GMT</pubDate>
+      <category>markets</category>
+    </item>
+  </channel>
+</rss>
