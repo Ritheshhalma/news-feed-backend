@@ -11,7 +11,16 @@ import json
 
 from django.core.management.base import BaseCommand
 from kombu import Connection
-from kombu.simple import SimpleQueue
+
+
+# Maps task name → queue (mirrors celery.py task_routes)
+_TASK_QUEUE = {
+    "articles.tasks.scrape_source": "scrape.scheduled",
+    "articles.tasks.refresh_source": "scrape.ondemand",
+    "articles.tasks.validate_source": "scrape.ondemand",
+    "articles.tasks.process_article_image": "media.process",
+    "articles.tasks.poll_live_articles": "live.poll",
+}
 
 
 class Command(BaseCommand):
@@ -23,8 +32,8 @@ class Command(BaseCommand):
         group.add_argument("--replay", action="store_true", help="Re-publish dead messages to their original queue")
         group.add_argument("--purge",  action="store_true", help="Discard all dead messages permanently")
         parser.add_argument("--limit", type=int, default=None, help="Max messages to process (default: all)")
-        parser.add_argument("--broker", default="amqp://guest:guest@localhost:5672//",
-                            help="RabbitMQ broker URL (default: amqp://guest:guest@localhost:5672//)")
+        parser.add_argument("--broker", default="amqp://guest:guest@rabbitmq:5672//",
+                            help="RabbitMQ broker URL")
 
     def handle(self, *args, **options):
         from django.conf import settings
@@ -42,7 +51,6 @@ class Command(BaseCommand):
 
     def _list(self, conn, limit):
         channel = conn.channel()
-        # Collect all messages first so we can requeue after printing (avoids infinite loop)
         msgs = []
         max_read = limit or 1000
         while len(msgs) < max_read:
@@ -65,6 +73,8 @@ class Command(BaseCommand):
     def _replay(self, conn, limit):
         channel = conn.channel()
         replayed = 0
+        skipped = 0
+
         while True:
             if limit and replayed >= limit:
                 break
@@ -72,29 +82,37 @@ class Command(BaseCommand):
             if msg is None:
                 break
 
-            # RabbitMQ sets x-death header with original queue/exchange info
-            x_death = msg.properties.get("application_headers", {}).get("x-death", [])
-            original_queue = x_death[0].get("queue") if x_death else None
+            task_name = self._task_name(msg)
 
-            if not original_queue:
+            # Try x-death header first (set by RabbitMQ native DLQ routing)
+            x_death = (msg.properties.get("application_headers") or {}).get("x-death", [])
+            target_queue = x_death[0].get("queue") if x_death else None
+
+            # Fall back to task_routes lookup (for manually published DLQ messages)
+            if not target_queue:
+                target_queue = _TASK_QUEUE.get(task_name)
+
+            if not target_queue:
                 self.stdout.write(self.style.WARNING(
-                    f"  [skip] Cannot determine original queue for message — discarding"
+                    f"  [skip] Unknown queue for task {task_name!r} — discarding"
                 ))
-                msg.ack()
+                channel.basic_ack(msg.delivery_tag)
+                skipped += 1
                 continue
 
-            # Re-publish to the original queue
             channel.basic_publish(
                 msg.body,
                 exchange="",
-                routing_key=original_queue,
+                routing_key=target_queue,
                 properties=msg.properties,
             )
-            msg.ack()
+            channel.basic_ack(msg.delivery_tag)
             replayed += 1
-            self.stdout.write(self.style.SUCCESS(f"  [replayed → {original_queue}] {self._task_name(msg)}"))
+            self.stdout.write(self.style.SUCCESS(
+                f"  [replayed → {target_queue}] {task_name}"
+            ))
 
-        self.stdout.write(f"\n{replayed} message(s) replayed.")
+        self.stdout.write(f"\n{replayed} replayed, {skipped} skipped.")
 
     # ── purge ─────────────────────────────────────────────────────────────
 
@@ -106,9 +124,7 @@ class Command(BaseCommand):
             return
 
         purged = 0
-        while True:
-            if purged >= limit:
-                break
+        while purged < limit:
             msg = channel.basic_get("dead.letter", no_ack=True)
             if msg is None:
                 break
@@ -119,8 +135,7 @@ class Command(BaseCommand):
 
     def _task_name(self, msg):
         try:
-            body = json.loads(msg.body)
-            return body.get("task", "unknown")
+            return json.loads(msg.body).get("task", "unknown")
         except Exception:
             return "unknown"
 
@@ -129,11 +144,11 @@ class Command(BaseCommand):
             body = json.loads(msg.body)
             task = body.get("task", "?")
             args = body.get("args", [])
-            x_death = msg.properties.get("application_headers", {}).get("x-death", [])
-            origin = x_death[0].get("queue", "?") if x_death else "?"
-            reason = x_death[0].get("reason", "?") if x_death else "?"
+            x_death = (msg.properties.get("application_headers") or {}).get("x-death", [])
+            origin = x_death[0].get("queue", "?") if x_death else _TASK_QUEUE.get(task, "?")
+            reason = x_death[0].get("reason", "?") if x_death else body.get("error", "?")
             self.stdout.write(
-                f"  [{idx}] task={task}  origin={origin}  reason={reason}\n"
+                f"  [{idx}] task={task}  queue={origin}  reason={reason}\n"
                 f"       args={args}"
             )
         except Exception as e:
