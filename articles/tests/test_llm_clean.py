@@ -56,6 +56,31 @@ def test_clean_article_raises_on_http_error(mocker):
         clean_article("title", "content")
 
 
+def test_clean_article_raises_on_json_array_not_dict(mocker):
+    """Test that a JSON array response (not an object) raises LLMCleanError."""
+    body = {"choices": [{"message": {"content": json.dumps([])}}]}
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    fake = httpx.Response(200, json=body, request=request)
+    mocker.patch("articles.services.llm_clean.httpx.post", return_value=fake)
+
+    with pytest.raises(LLMCleanError):
+        clean_article("title", "content")
+
+
+def test_clean_article_raises_on_non_string_field(mocker):
+    """Test that a non-string field value (e.g., int) raises LLMCleanError."""
+    fake = _fake_response({
+        "title": 123,  # int instead of string
+        "content": "body",
+        "category": "Business",
+        "is_new_category": False,
+    })
+    mocker.patch("articles.services.llm_clean.httpx.post", return_value=fake)
+
+    with pytest.raises(LLMCleanError):
+        clean_article("title", "content")
+
+
 def test_category_taxonomy_is_the_fixed_eighteen_categories():
     assert CATEGORY_TAXONOMY == [
         "India", "World", "Business", "Sports", "Entertainment", "Technology",

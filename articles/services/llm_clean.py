@@ -72,10 +72,31 @@ def clean_article(title: str, content: str) -> CleanResult:
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise LLMCleanError(f"DeepSeek returned an unparseable response: {exc}") from exc
 
-    cleaned_title = (data.get("title") or "").strip()
-    cleaned_content = (data.get("content") or "").strip()
-    category = (data.get("category") or "").strip()
-    is_new_category = bool(data.get("is_new_category", False))
+    # Validate that the parsed JSON is a dict, not an array/string/number
+    if not isinstance(data, dict):
+        raise LLMCleanError(f"DeepSeek response was not a JSON object: {data!r}")
+
+    # Extract and validate field types before calling .strip()
+    try:
+        title_val = data.get("title")
+        content_val = data.get("content")
+        category_val = data.get("category")
+
+        # Ensure required fields are strings before calling .strip()
+        if title_val is not None and not isinstance(title_val, str):
+            raise LLMCleanError(f"Field 'title' is not a string: {title_val!r}")
+        if content_val is not None and not isinstance(content_val, str):
+            raise LLMCleanError(f"Field 'content' is not a string: {content_val!r}")
+        if category_val is not None and not isinstance(category_val, str):
+            raise LLMCleanError(f"Field 'category' is not a string: {category_val!r}")
+
+        cleaned_title = (title_val or "").strip()
+        cleaned_content = (content_val or "").strip()
+        category = (category_val or "").strip()
+        is_new_category = bool(data.get("is_new_category", False))
+    except AttributeError as exc:
+        # Safety net for any remaining AttributeError
+        raise LLMCleanError(f"DeepSeek response has invalid field types: {exc}") from exc
 
     if not cleaned_title or not cleaned_content or not category:
         raise LLMCleanError(f"DeepSeek response missing required fields: {data!r}")
