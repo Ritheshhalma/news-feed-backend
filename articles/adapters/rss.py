@@ -1,3 +1,4 @@
+import asyncio
 import calendar
 import logging
 import re
@@ -7,6 +8,11 @@ import feedparser
 from bs4 import BeautifulSoup
 
 from articles.adapters.base import BaseAdapter, RawArticle
+from articles.adapters.html import (
+    _tags_from_url, _dedup_tags,
+    _extract_with_trafilatura, _fetch_article_pages, _get_known_urls,
+    _MAX_STAGE2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +44,12 @@ def _category_from_url(url: str) -> str | None:
 
 
 def _strip_html(html: str) -> str:
-    """Remove HTML tags and collapse whitespace."""
     if not html:
         return ""
     return BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
 
 
 def _struct_time_to_iso(t) -> str | None:
-    """Convert feedparser's published_parsed (UTC struct_time) to ISO 8601 string."""
     if not t:
         return None
     try:
@@ -55,16 +59,16 @@ def _struct_time_to_iso(t) -> str | None:
 
 
 def _extract_content(entry) -> str:
-    """Prefer full article body (entry.content); fall back to summary excerpt."""
     for c in entry.get("content", []):
         val = _strip_html(c.get("value", ""))
-        if len(val) > 100:          # ignore tiny/empty content objects
+        if len(val) > 100:
             return val
     return _strip_html(entry.get("summary", ""))
 
 
 class RSSAdapter(BaseAdapter):
-    def fetch(self) -> list[RawArticle]:
+
+    def fetch(self, force: bool = False) -> list[RawArticle]:
         feed = feedparser.parse(self.source.url)
         results = []
         for entry in feed.entries:
@@ -72,20 +76,18 @@ class RSSAdapter(BaseAdapter):
                 raw_tags = entry.get("tags", [])
                 tag_terms = [t.get("term", "").strip() for t in raw_tags if t.get("term", "").strip()]
 
-                # Prefer structured URL-based category; it's more reliable than feed tags
                 url_category = _category_from_url(entry.get("link", ""))
+                url_tags = _tags_from_url(entry.get("link", ""))
                 if url_category:
                     category = url_category
-                    tags = tag_terms          # ALL tag terms become tags
+                    tags = _dedup_tags(tag_terms + url_tags)
                 else:
-                    # No URL category — use first tag term as category, rest as tags
                     category = (
                         tag_terms[0] if tag_terms
                         else entry.get("category")
                     )
-                    tags = tag_terms[1:] if len(tag_terms) > 1 else []
+                    tags = _dedup_tags((tag_terms[1:] if len(tag_terms) > 1 else []) + url_tags)
 
-                # Author: try multiple feed fields
                 author = (
                     entry.get("author")
                     or entry.get("dc_creator")
@@ -107,7 +109,38 @@ class RSSAdapter(BaseAdapter):
                 logger.warning("Skipping malformed RSS entry from %s: %s", self.source.url, exc)
                 continue
 
+        parser_mode = getattr(self.source, "parser_mode", "rss")
+        if parser_mode == "rss/multistage" and results:
+            candidates = results[:_MAX_STAGE2]
+            if not force and self.source is not None and self.source.portal_id:
+                known = _get_known_urls(self.source.portal, [a.source_url for a in candidates])
+                to_enrich = [a for a in candidates if a.source_url not in known]
+                logger.info(
+                    "RSSAdapter Stage 2: %d new / %d total",
+                    len(to_enrich), len(candidates),
+                )
+            else:
+                to_enrich = candidates
+                logger.info(
+                    "RSSAdapter Stage 2: enriching all %d candidates (force=%s)",
+                    len(candidates), force,
+                )
+            if to_enrich:
+                enriched = asyncio.run(_fetch_article_pages(to_enrich))
+                # Re-attach RSS-level fallbacks not in Stage 2 batch
+                enriched_urls = {a.source_url for a in to_enrich}
+                results = enriched + [a for a in results if a.source_url not in enriched_urls]
+
         return results
+
+    def validate(self) -> None:
+        feed = feedparser.parse(self.source.url)
+        if feed.bozo and not feed.entries:
+            raise ValueError(
+                f"Invalid RSS feed at {self.source.url}: {feed.bozo_exception}"
+            )
+        if not feed.entries:
+            raise ValueError(f"RSS feed at {self.source.url} returned no entries")
 
     @staticmethod
     def _extract_image(entry) -> str | None:
