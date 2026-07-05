@@ -113,9 +113,18 @@ def ingest_articles(portal, raw_articles) -> dict:
 
                 new_hash = content_hash(raw.content)
                 update_fields = ["updated_at"]
-                title_changed = existing.title != raw.title
+                # Hash-based, not `existing.title != raw.title` — once
+                # clean_article_llm rewrites `title` to a cleaned version, a
+                # literal string compare would permanently differ from the raw
+                # scrape even when the source hasn't changed, clobbering the
+                # cleaned title back to raw on every subsequent scrape.
+                # `hashed_key` is scraper-owned (clean_article_llm must never
+                # write it) so it stays a reliable "raw title at last scrape"
+                # fingerprint regardless of what LLM cleaning does to the
+                # display `title` field afterward.
+                title_source_changed = key != existing.hashed_key
                 content_changed = existing.content_hash != new_hash
-                if title_changed:
+                if title_source_changed:
                     existing.title = raw.title
                     existing.hashed_key = key
                     update_fields += ["title", "hashed_key"]
@@ -123,7 +132,7 @@ def ingest_articles(portal, raw_articles) -> dict:
                     existing.content = raw.content
                     existing.content_hash = new_hash
                     update_fields += ["content", "content_hash"]
-                if title_changed or content_changed:
+                if title_source_changed or content_changed:
                     counts["updated"] += 1
                 else:
                     counts["unchanged"] += 1

@@ -90,3 +90,34 @@ def test_ingest_does_not_push_when_nothing_changed(mocker):
     mock_send = mocker.patch("articles.services.ingest._push_feed_update")
     ingest_articles(portal, [_raw(content="same", url="https://example.com/push2")])
     mock_send.assert_not_called()
+
+
+def test_ingest_treats_article_as_unchanged_after_simulated_llm_title_cleanup():
+    """Regression test: once a title has been rewritten by something other than
+    the scraper (e.g. clean_article_llm), re-ingesting the SAME raw article must
+    still report 'unchanged' and must NOT clobber the cleaned title back to raw.
+    A literal `existing.title != raw.title` comparison would wrongly say
+    'changed' here, since the stored title no longer matches the raw scrape.
+    """
+    portal = MSTArticlePortal.objects.create(name="LLM Regression Portal")
+    ingest_articles(portal, [_raw(
+        title="Garbled Raw Title Extra Junk",
+        url="https://example.com/llm-regress",
+        content="body",
+    )])
+
+    article = Article.objects.get(source_url="https://example.com/llm-regress")
+    # Simulate clean_article_llm: rewrites title only, never hashed_key.
+    article.title = "Garbled Raw Title"
+    article.save(update_fields=["title"])
+
+    result, failures = ingest_articles(portal, [_raw(
+        title="Garbled Raw Title Extra Junk",
+        url="https://example.com/llm-regress",
+        content="body",
+    )])
+
+    assert result == {"created": 0, "updated": 0, "unchanged": 1, "failed": 0}
+    assert failures == []
+    article.refresh_from_db()
+    assert article.title == "Garbled Raw Title"  # cleaned title preserved, not clobbered
