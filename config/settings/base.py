@@ -92,6 +92,10 @@ CELERY_TASK_TIME_LIMIT = 90
 CELERY_TASK_DEFAULT_RETRY_DELAY = 30
 CELERY_TASK_REJECT_ON_WORKER_LOST = True  # re-queue (→ DLQ) if worker crashes mid-task
 
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
 REST_FRAMEWORK = {
     "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.URLPathVersioning",
     "DEFAULT_VERSION": "v1",
