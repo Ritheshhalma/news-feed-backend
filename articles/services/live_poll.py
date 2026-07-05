@@ -1,5 +1,17 @@
+"""
+Live data polling for forex and stock articles.
+
+Two concrete fetchers implement BaseLiveFetcher:
+
+  ForexFetcher  — scrapes x-rates.com for exchange rates
+  StockFetcher  — calls Yahoo Finance chart API for equity prices
+
+fetch_live_value() is the public entry point; it selects the correct fetcher
+by poll_type and returns a plain dict of live data.
+"""
 import logging
 import re
+from abc import ABC, abstractmethod
 
 import httpx
 from asgiref.sync import async_to_sync
@@ -14,83 +26,94 @@ _USER_AGENT = "Mozilla/5.0 (compatible; NewsFeedBot/1.0)"
 _HTTP_HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json, text/html"}
 
 
+# ── Abstract base ─────────────────────────────────────────────────────────────
+
+class BaseLiveFetcher(ABC):
+    """Contract for live data sources (forex, stock, etc.)."""
+
+    @abstractmethod
+    def fetch(self, url: str) -> dict:
+        """Fetch live data from *url* and return a plain dict of values."""
+        ...
+
+
 # ── Forex fetcher (x-rates.com) ───────────────────────────────────────────────
 
-def fetch_forex(url: str) -> dict:
-    response = httpx.get(url, headers=_HTTP_HEADERS, timeout=10.0)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
+class ForexFetcher(BaseLiveFetcher):
 
-    rate_tag = soup.find(class_="ccOutputRslt")
-    if not rate_tag:
-        raise ValueError("rate element not found — source markup may have changed")
+    def fetch(self, url: str) -> dict:
+        response = httpx.get(url, headers=_HTTP_HEADERS, timeout=10.0)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
 
-    raw = rate_tag.get_text(strip=True)
-    m = re.search(r"[\d,]+\.?\d*", raw)
-    if not m:
-        raise ValueError("no numeric value found in rate element")
+        rate_tag = soup.find(class_="ccOutputRslt")
+        if not rate_tag:
+            raise ValueError("rate element not found — source markup may have changed")
 
-    rate = float(m.group(0).replace(",", ""))
+        raw = rate_tag.get_text(strip=True)
+        m = re.search(r"[\d,]+\.?\d*", raw)
+        if not m:
+            raise ValueError("no numeric value found in rate element")
 
-    # Best-effort: also read the 24-h change percentage from ccOutputTrend
-    change_pct = None
-    trend_tag = soup.find(class_="ccOutputTrend")
-    if trend_tag:
-        cm = re.search(r"[-+]?[\d.]+", trend_tag.get_text(strip=True))
-        if cm:
-            change_pct = float(cm.group(0))
+        rate = float(m.group(0).replace(",", ""))
 
-    result = {"rate": rate}
-    if change_pct is not None:
-        result["change_pct"] = change_pct
-    return result
+        change_pct = None
+        trend_tag = soup.find(class_="ccOutputTrend")
+        if trend_tag:
+            cm = re.search(r"[-+]?[\d.]+", trend_tag.get_text(strip=True))
+            if cm:
+                change_pct = float(cm.group(0))
+
+        result = {"rate": rate}
+        if change_pct is not None:
+            result["change_pct"] = change_pct
+        return result
 
 
 # ── Stock fetcher (Yahoo Finance chart API) ───────────────────────────────────
 
-_YF_HEADERS = {
-    "User-Agent": _USER_AGENT,
-    "Accept": "application/json",
-}
+_YF_HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
 
 
-def fetch_stock(url: str) -> dict:
+class StockFetcher(BaseLiveFetcher):
     """
     url should be the Yahoo Finance chart endpoint, e.g.:
       https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS
     """
-    response = httpx.get(url, headers=_YF_HEADERS, timeout=10.0, follow_redirects=True)
-    response.raise_for_status()
-    payload = response.json()
 
-    try:
-        result_block = payload["chart"]["result"][0]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected Yahoo Finance response shape") from exc
+    def fetch(self, url: str) -> dict:
+        response = httpx.get(url, headers=_YF_HEADERS, timeout=10.0, follow_redirects=True)
+        response.raise_for_status()
+        payload = response.json()
 
-    meta = result_block["meta"]
-    price = float(meta["regularMarketPrice"])
-    prev_close = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
-    change = round(price - prev_close, 4)
-    change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        try:
+            result_block = payload["chart"]["result"][0]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError("Unexpected Yahoo Finance response shape") from exc
 
-    return {
-        "price": price,
-        "prev_close": prev_close,
-        "change": change,
-        "change_pct": change_pct,
-        "symbol": meta.get("symbol", ""),
-        "currency": meta.get("currency", ""),
-        "exchange": meta.get("exchangeName", ""),
-        "market_state": meta.get("marketState", ""),
-    }
+        meta = result_block["meta"]
+        price = float(meta["regularMarketPrice"])
+        prev_close = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+        change = round(price - prev_close, 4)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        return {
+            "price": price,
+            "prev_close": prev_close,
+            "change": change,
+            "change_pct": change_pct,
+            "symbol": meta.get("symbol", ""),
+            "currency": meta.get("currency", ""),
+            "exchange": meta.get("exchangeName", ""),
+            "market_state": meta.get("marketState", ""),
+        }
 
 
-# ── Dispatcher ────────────────────────────────────────────────────────────────
+# ── Registry ──────────────────────────────────────────────────────────────────
 
-_FETCHERS = {
-    "forex": fetch_forex,
-    "stock": fetch_stock,
+_FETCHERS: dict[str, BaseLiveFetcher] = {
+    "forex": ForexFetcher(),
+    "stock": StockFetcher(),
 }
 
 
@@ -98,7 +121,7 @@ def fetch_live_value(poll_type: str, url: str) -> dict:
     fetcher = _FETCHERS.get(poll_type)
     if not fetcher:
         raise ValueError(f"Unknown poll_type: {poll_type!r}. Valid types: {list(_FETCHERS)}")
-    return fetcher(url)
+    return fetcher.fetch(url)
 
 
 # ── Push + poll ───────────────────────────────────────────────────────────────

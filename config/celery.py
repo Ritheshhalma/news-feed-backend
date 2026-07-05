@@ -45,6 +45,13 @@ app.conf.task_queues = [
                          "x-dead-letter-routing-key": "dead.letter"},
     ),
     Queue(
+        "scrape.playwright",
+        Exchange("scrape.playwright", type="direct"),
+        routing_key="scrape.playwright",
+        queue_arguments={"x-dead-letter-exchange": "dead.letter",
+                         "x-dead-letter-routing-key": "dead.letter"},
+    ),
+    Queue(
         "dead.letter",
         _dead_exchange,
         routing_key="dead.letter",
@@ -53,8 +60,10 @@ app.conf.task_queues = [
 
 app.conf.task_routes = {
     "articles.tasks.scrape_source": {"queue": "scrape.scheduled"},
+    "articles.tasks.scrape_playwright_source": {"queue": "scrape.playwright"},
     "articles.tasks.refresh_source": {"queue": "scrape.ondemand"},
     "articles.tasks.validate_source": {"queue": "scrape.ondemand"},
+    "articles.tasks.resync_source": {"queue": "scrape.ondemand"},
     "articles.tasks.process_article_image": {"queue": "media.process"},
     "articles.tasks.poll_live_articles": {"queue": "live.poll"},
 }

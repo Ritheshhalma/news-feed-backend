@@ -16,6 +16,7 @@ from kombu import Connection
 # Maps task name → queue (mirrors celery.py task_routes)
 _TASK_QUEUE = {
     "articles.tasks.scrape_source": "scrape.scheduled",
+    "articles.tasks.scrape_playwright_source": "scrape.playwright",
     "articles.tasks.refresh_source": "scrape.ondemand",
     "articles.tasks.validate_source": "scrape.ondemand",
     "articles.tasks.process_article_image": "media.process",
@@ -52,7 +53,7 @@ class Command(BaseCommand):
     def _list(self, conn, limit):
         channel = conn.channel()
         msgs = []
-        max_read = limit or 1000
+        max_read = limit if limit is not None else 1000
         while len(msgs) < max_read:
             msg = channel.basic_get("dead.letter", no_ack=False)
             if msg is None:
@@ -66,7 +67,8 @@ class Command(BaseCommand):
         if not msgs:
             self.stdout.write(self.style.SUCCESS("dead.letter queue is empty."))
         else:
-            self.stdout.write(f"\n{len(msgs)} message(s) in dead.letter queue.")
+            note = " (capped — use --limit to see more)" if limit is None and len(msgs) == 1000 else ""
+            self.stdout.write(f"\n{len(msgs)} message(s) in dead.letter queue.{note}")
 
     # ── replay ────────────────────────────────────────────────────────────
 
@@ -76,7 +78,7 @@ class Command(BaseCommand):
         skipped = 0
 
         while True:
-            if limit and replayed >= limit:
+            if limit is not None and replayed >= limit:
                 break
             msg = channel.basic_get("dead.letter", no_ack=False)
             if msg is None:
@@ -100,12 +102,7 @@ class Command(BaseCommand):
                 skipped += 1
                 continue
 
-            channel.basic_publish(
-                msg.body,
-                exchange="",
-                routing_key=target_queue,
-                properties=msg.properties,
-            )
+            channel.basic_publish(msg, exchange="", routing_key=target_queue)
             channel.basic_ack(msg.delivery_tag)
             replayed += 1
             self.stdout.write(self.style.SUCCESS(
