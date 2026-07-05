@@ -62,3 +62,16 @@ def test_article_tags_map_links_article_and_tag():
     mapping = ArticleTagMap.objects.create(article=article, tag=tag)
     assert mapping.article_id == article.id
     assert mapping.tag_id == tag.id
+
+def test_category_is_llm_suggested_defaults_false():
+    cat = MSTArticleCategory.objects.create(name="Business")
+    assert cat.is_llm_suggested is False
+
+def test_article_llm_clean_fields_default_to_not_run():
+    portal = MSTArticlePortal.objects.create(name="LLM Field Portal")
+    article = Article.objects.create(
+        title="Story", source_url="https://example.com/llm-fields",
+        hashed_key="hash-llm-fields", content="body", portal=portal,
+    )
+    assert article.llm_cleaned_at is None
+    assert article.llm_clean_status == ""

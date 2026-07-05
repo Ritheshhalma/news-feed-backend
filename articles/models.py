@@ -13,6 +13,7 @@ class MSTArticlePortal(models.Model):
 class MSTArticleCategory(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, unique=True)
+    is_llm_suggested = models.BooleanField(default=False)
 
     class Meta:
         verbose_name_plural = "Article categories"
@@ -56,6 +57,15 @@ class Article(models.Model):
     author = models.ForeignKey(MSTAuthor, on_delete=models.SET_NULL, null=True, blank=True)
     portal = models.ForeignKey(MSTArticlePortal, on_delete=models.CASCADE)
     category = models.ForeignKey(MSTArticleCategory, on_delete=models.SET_NULL, null=True, blank=True)
+    LLM_CLEAN_STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("success", "Success"),
+        ("failed", "Failed"),
+    ]
+    llm_cleaned_at = models.DateTimeField(null=True, blank=True)
+    llm_clean_status = models.CharField(
+        max_length=10, choices=LLM_CLEAN_STATUS_CHOICES, blank=True, default=""
+    )
 
     class Meta:
         ordering = ["-published_at"]
