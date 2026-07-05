@@ -4,12 +4,12 @@ import time
 
 import httpx
 from celery import Task, shared_task
+from django.db import IntegrityError
 from django.utils import timezone
 
 from articles.adapters.base import BaseAdapter
 from articles.models import Article, ArticleMedia, ArticleSource, MSTArticleCategory, SourceFetchLog
 from articles.services import llm_clean
-from articles.services.dedup import content_hash
 from articles.services.ingest import ingest_articles
 from articles.services.media import save_image
 
@@ -289,7 +289,7 @@ def poll_live_articles() -> None:
 @shared_task(
     base=DLQTask,
     bind=True,
-    autoretry_for=(llm_clean.LLMCleanError,),
+    autoretry_for=(llm_clean.LLMCleanError, Article.DoesNotExist),
     retry_backoff=True,
     retry_backoff_max=120,
     retry_jitter=True,
@@ -300,9 +300,11 @@ def clean_article_llm(self, article_id: str) -> None:
     """Async title/content repair + category classification via DeepSeek.
     See docs/superpowers/specs/2026-07-05-deepseek-article-cleaning-design.md.
 
-    May only write title, content, content_hash, category, llm_cleaned_at,
-    llm_clean_status. Must never write hashed_key — see the
-    title_source_changed comment in services/ingest.py for why.
+    May only write title, content, category, llm_cleaned_at, llm_clean_status.
+    Must never write content_hash or hashed_key — both are scraper-owned raw
+    fingerprints that change detection depends on staying pinned to the raw
+    scrape, independent of what LLM cleaning does to the title/content
+    display fields.
     """
     article = Article.objects.get(id=article_id)
 
@@ -317,18 +319,22 @@ def clean_article_llm(self, article_id: str) -> None:
 
     category = MSTArticleCategory.objects.filter(name__iexact=result.category).first()
     if category is None:
-        category = MSTArticleCategory.objects.create(
-            name=result.category, is_llm_suggested=result.is_new_category,
-        )
+        try:
+            category = MSTArticleCategory.objects.create(
+                name=result.category, is_llm_suggested=result.is_new_category,
+            )
+        except IntegrityError:
+            # Lost a race with a concurrent clean_article_llm run that created
+            # the same category first — fetch the row it just created.
+            category = MSTArticleCategory.objects.filter(name__iexact=result.category).first()
 
     article.title = result.title
     article.content = result.content
-    article.content_hash = content_hash(result.content)
     article.category = category
     article.llm_cleaned_at = timezone.now()
     article.llm_clean_status = "success"
     article.save(update_fields=[
-        "title", "content", "content_hash", "category",
+        "title", "content", "category",
         "llm_cleaned_at", "llm_clean_status",
     ])
     logger.info("LLM clean succeeded for article %s (category=%s)", article_id, category.name)

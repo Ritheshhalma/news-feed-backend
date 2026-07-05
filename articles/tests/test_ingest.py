@@ -123,6 +123,39 @@ def test_ingest_treats_article_as_unchanged_after_simulated_llm_title_cleanup():
     assert article.title == "Garbled Raw Title"  # cleaned title preserved, not clobbered
 
 
+def test_ingest_treats_article_as_unchanged_after_simulated_llm_content_cleanup():
+    """Regression test: once content has been rewritten by something other than
+    the scraper (e.g. clean_article_llm), re-ingesting the SAME raw article must
+    still report 'unchanged' and must NOT clobber the cleaned content back to raw.
+    This mirrors the title-cleanup regression test above, but for content_hash:
+    clean_article_llm must never touch content_hash, so a literal comparison of
+    the freshly-hashed raw content against the stored (untouched) content_hash
+    should still match.
+    """
+    portal = MSTArticlePortal.objects.create(name="LLM Content Regression Portal")
+    ingest_articles(portal, [_raw(
+        title="Story",
+        url="https://example.com/llm-content-regress",
+        content="garbled raw body with artifacts",
+    )])
+
+    article = Article.objects.get(source_url="https://example.com/llm-content-regress")
+    # Simulate clean_article_llm: rewrites content only, never content_hash.
+    article.content = "cleaned version of body"
+    article.save(update_fields=["content"])
+
+    result, failures = ingest_articles(portal, [_raw(
+        title="Story",
+        url="https://example.com/llm-content-regress",
+        content="garbled raw body with artifacts",
+    )])
+
+    assert result == {"created": 0, "updated": 0, "unchanged": 1, "failed": 0}
+    assert failures == []
+    article.refresh_from_db()
+    assert article.content == "cleaned version of body"  # cleaned content preserved, not clobbered
+
+
 def test_ingest_queues_llm_clean_for_new_article(mocker):
     mock_delay = mocker.patch("articles.tasks.clean_article_llm.delay")
     portal = MSTArticlePortal.objects.create(name="LLM Queue Portal 1")
