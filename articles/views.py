@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
 from rest_framework import serializers
@@ -7,16 +10,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from articles.adapters.html import HTMLAdapter
-from articles.adapters.rss import RSSAdapter
 from articles.filters import ArticleFilter
 from articles.models import Article, ArticleRealTimeState, MSTArticleCategory, MSTTag, ArticleSource, MSTArticlePortal, SourceFetchLog
 from articles.serializers import (
     ArticleSerializer, MSTArticleCategorySerializer, MSTTagSerializer, ArticleSourceSerializer,
 )
-from articles.tasks import scrape_source
-
-_ADAPTERS = {"rss": RSSAdapter, "html": HTMLAdapter}
+from articles.services.detect import auto_detect_parser_mode
+from articles.tasks import scrape_source, scrape_playwright_source, resync_source, _get_adapter
 
 
 class ArticleViewSet(viewsets.ReadOnlyModelViewSet):
@@ -52,29 +52,110 @@ class MSTTagViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MSTTagSerializer
 
 
+# Safety net only — a legitimate run should always finish (and mark its own
+# SourceFetchLog success/failed/partial) well before this. It exists purely so
+# a crashed/killed worker can't leave a source permanently un-refreshable.
+_STALE_LOCK_MINUTES = 20
+
+
+def _fetch_in_progress(source) -> bool:
+    return SourceFetchLog.objects.filter(
+        source=source,
+        status="started",
+        started_at__gte=timezone.now() - timedelta(minutes=_STALE_LOCK_MINUTES),
+    ).exists()
+
+
+def _in_progress_conflict(source) -> Response | None:
+    """Return a 409 Response if a fetch is already running for source, else None."""
+    if not _fetch_in_progress(source):
+        return None
+    return Response(
+        {"detail": "A refresh is already in progress for this source."},
+        status=http_status.HTTP_409_CONFLICT,
+    )
+
+
 class ArticleSourceViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ArticleSource.objects.select_related("portal").order_by("-last_fetched_at")
     serializer_class = ArticleSourceSerializer
     http_method_names = ["get", "post", "head", "options"]
 
     def create(self, request, *args, **kwargs):
-        portal, _ = MSTArticlePortal.objects.get_or_create(name=request.data["portal_name"])
-        source = ArticleSource.objects.create(
-            url=request.data["url"], source_type=request.data["source_type"], portal=portal,
-        )
+        url = request.data.get("url", "").strip()
+        portal_name = request.data.get("portal_name", "").strip()
+
+        if not url or not portal_name:
+            return Response(
+                {"detail": "url and portal_name are required."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Auto-detect how this URL should be scraped
         try:
-            _ADAPTERS[source.source_type](source).fetch()
+            parser_mode, effective_url = auto_detect_parser_mode(url)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        source_type = "rss" if parser_mode == "rss" else "html"
+
+        # Case-insensitive lookup so "bbc" / "BBC" / " BBC " all resolve to the
+        # same portal instead of fragmenting into separate rows that split a
+        # single outlet's articles across two different "portals".
+        portal = MSTArticlePortal.objects.filter(name__iexact=portal_name).first()
+        if portal is None:
+            portal = MSTArticlePortal.objects.create(name=portal_name)
+        source = ArticleSource.objects.create(
+            url=effective_url,
+            source_type=source_type,
+            parser_mode=parser_mode,
+            portal=portal,
+        )
+
+        # Validate the source is reachable and parseable
+        try:
+            _get_adapter(source).validate()
             source.status = "active"
         except Exception as exc:
             source.status = "failed"
             source.error_message = str(exc)
+
         source.save(update_fields=["status", "error_message"])
         return Response(ArticleSourceSerializer(source).data, status=http_status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def refresh(self, request, pk=None):
         source = self.get_object()
-        task = scrape_source.delay(str(source.id), trigger_type="on_demand")
+        force = bool(request.data.get("force", False))
+
+        conflict = _in_progress_conflict(source)
+        if conflict:
+            return conflict
+
+        if source.parser_mode == "js/playwright":
+            task = scrape_playwright_source.delay(
+                str(source.id), trigger_type="on_demand", force=force
+            )
+        else:
+            task = scrape_source.delay(
+                str(source.id), trigger_type="on_demand", force=force
+            )
+
+        return Response({"task_id": task.id}, status=http_status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"])
+    def resync(self, request, pk=None):
+        """Deep resync: re-fetch every stored article for this source's portal
+        directly by its own source_url — reaches articles Refresh can't (ones
+        that scrolled off the listing page, or stuck with bad/empty content).
+        """
+        source = self.get_object()
+
+        conflict = _in_progress_conflict(source)
+        if conflict:
+            return conflict
+
+        task = resync_source.delay(str(source.id))
         return Response({"task_id": task.id}, status=http_status.HTTP_202_ACCEPTED)
 
 
@@ -84,7 +165,8 @@ class SourceFetchLogSerializer(serializers.ModelSerializer):
         fields = [
             "id", "task_id", "trigger_type", "attempt", "status", "started_at",
             "finished_at", "duration_ms", "articles_found", "articles_created",
-            "articles_updated", "articles_unchanged", "error_message",
+            "articles_updated", "articles_unchanged", "articles_failed",
+            "error_message", "details",
         ]
 
 
