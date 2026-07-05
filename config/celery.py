@@ -52,6 +52,13 @@ app.conf.task_queues = [
                          "x-dead-letter-routing-key": "dead.letter"},
     ),
     Queue(
+        "llm.clean",
+        Exchange("llm.clean", type="direct"),
+        routing_key="llm.clean",
+        queue_arguments={"x-dead-letter-exchange": "dead.letter",
+                         "x-dead-letter-routing-key": "dead.letter"},
+    ),
+    Queue(
         "dead.letter",
         _dead_exchange,
         routing_key="dead.letter",
@@ -66,4 +73,5 @@ app.conf.task_routes = {
     "articles.tasks.resync_source": {"queue": "scrape.ondemand"},
     "articles.tasks.process_article_image": {"queue": "media.process"},
     "articles.tasks.poll_live_articles": {"queue": "live.poll"},
+    "articles.tasks.clean_article_llm": {"queue": "llm.clean"},
 }

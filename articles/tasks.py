@@ -7,7 +7,9 @@ from celery import Task, shared_task
 from django.utils import timezone
 
 from articles.adapters.base import BaseAdapter
-from articles.models import Article, ArticleMedia, ArticleSource, SourceFetchLog
+from articles.models import Article, ArticleMedia, ArticleSource, MSTArticleCategory, SourceFetchLog
+from articles.services import llm_clean
+from articles.services.dedup import content_hash
 from articles.services.ingest import ingest_articles
 from articles.services.media import save_image
 
@@ -282,3 +284,51 @@ def poll_live_articles() -> None:
     from articles.services.live_poll import poll_one_live_article
     for article in Article.objects.filter(is_live=True).exclude(live_poll_url=""):
         poll_one_live_article(article)
+
+
+@shared_task(
+    base=DLQTask,
+    bind=True,
+    autoretry_for=(llm_clean.LLMCleanError,),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+    max_retries=3,
+    acks_late=True,
+)
+def clean_article_llm(self, article_id: str) -> None:
+    """Async title/content repair + category classification via DeepSeek.
+    See docs/superpowers/specs/2026-07-05-deepseek-article-cleaning-design.md.
+
+    May only write title, content, content_hash, category, llm_cleaned_at,
+    llm_clean_status. Must never write hashed_key — see the
+    title_source_changed comment in services/ingest.py for why.
+    """
+    article = Article.objects.get(id=article_id)
+
+    try:
+        result = llm_clean.clean_article(article.title, article.content)
+    except llm_clean.LLMCleanError:
+        logger.warning("LLM clean failed for article %s, will retry if attempts remain", article_id)
+        Article.objects.filter(id=article_id).update(
+            llm_clean_status="failed", llm_cleaned_at=timezone.now(),
+        )
+        raise
+
+    category = MSTArticleCategory.objects.filter(name__iexact=result.category).first()
+    if category is None:
+        category = MSTArticleCategory.objects.create(
+            name=result.category, is_llm_suggested=result.is_new_category,
+        )
+
+    article.title = result.title
+    article.content = result.content
+    article.content_hash = content_hash(result.content)
+    article.category = category
+    article.llm_cleaned_at = timezone.now()
+    article.llm_clean_status = "success"
+    article.save(update_fields=[
+        "title", "content", "content_hash", "category",
+        "llm_cleaned_at", "llm_clean_status",
+    ])
+    logger.info("LLM clean succeeded for article %s (category=%s)", article_id, category.name)
