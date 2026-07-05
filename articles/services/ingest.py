@@ -100,6 +100,7 @@ def ingest_articles(portal, raw_articles) -> dict:
                         category=category,
                         author=author,
                         published_at=published_at,
+                        llm_clean_status="pending",
                     )
                     tag_names = list(raw.tags)
                     if category:
@@ -108,6 +109,8 @@ def ingest_articles(portal, raw_articles) -> dict:
                     if raw.image_url:
                         from articles.tasks import process_article_image  # avoids circular import
                         process_article_image.delay(str(article.id), raw.image_url)
+                    from articles.tasks import clean_article_llm  # avoids circular import
+                    clean_article_llm.delay(str(article.id))
                     counts["created"] += 1
                     continue
 
@@ -133,6 +136,8 @@ def ingest_articles(portal, raw_articles) -> dict:
                     existing.content_hash = new_hash
                     update_fields += ["content", "content_hash"]
                 if title_source_changed or content_changed:
+                    existing.llm_clean_status = "pending"
+                    update_fields.append("llm_clean_status")
                     counts["updated"] += 1
                 else:
                     counts["unchanged"] += 1
@@ -147,6 +152,9 @@ def ingest_articles(portal, raw_articles) -> dict:
                     update_fields.append("published_at")
                 if len(update_fields) > 1:
                     existing.save(update_fields=update_fields)
+                if title_source_changed or content_changed:
+                    from articles.tasks import clean_article_llm  # avoids circular import
+                    clean_article_llm.delay(str(existing.id))
                 tag_names = list(raw.tags)
                 if category:
                     tag_names.append(category.name)

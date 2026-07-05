@@ -121,3 +121,36 @@ def test_ingest_treats_article_as_unchanged_after_simulated_llm_title_cleanup():
     assert failures == []
     article.refresh_from_db()
     assert article.title == "Garbled Raw Title"  # cleaned title preserved, not clobbered
+
+
+def test_ingest_queues_llm_clean_for_new_article(mocker):
+    mock_delay = mocker.patch("articles.tasks.clean_article_llm.delay")
+    portal = MSTArticlePortal.objects.create(name="LLM Queue Portal 1")
+
+    ingest_articles(portal, [_raw(url="https://example.com/llmq1")])
+
+    article = Article.objects.get(source_url="https://example.com/llmq1")
+    mock_delay.assert_called_once_with(str(article.id))
+    assert article.llm_clean_status == "pending"
+
+
+def test_ingest_queues_llm_clean_when_content_changed(mocker):
+    portal = MSTArticlePortal.objects.create(name="LLM Queue Portal 2")
+    ingest_articles(portal, [_raw(url="https://example.com/llmq2", content="v1")])
+    mock_delay = mocker.patch("articles.tasks.clean_article_llm.delay")
+
+    ingest_articles(portal, [_raw(url="https://example.com/llmq2", content="v2")])
+
+    mock_delay.assert_called_once()
+    article = Article.objects.get(source_url="https://example.com/llmq2")
+    assert article.llm_clean_status == "pending"
+
+
+def test_ingest_does_not_queue_llm_clean_when_unchanged(mocker):
+    portal = MSTArticlePortal.objects.create(name="LLM Queue Portal 3")
+    ingest_articles(portal, [_raw(url="https://example.com/llmq3", content="same")])
+    mock_delay = mocker.patch("articles.tasks.clean_article_llm.delay")
+
+    ingest_articles(portal, [_raw(url="https://example.com/llmq3", content="same")])
+
+    mock_delay.assert_not_called()
