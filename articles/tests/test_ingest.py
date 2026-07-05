@@ -12,16 +12,18 @@ def _raw(title="Story", url="https://example.com/1", content="body"):
 
 def test_ingest_inserts_new_article():
     portal = MSTArticlePortal.objects.create(name="Ingest Portal 1")
-    result = ingest_articles(portal, [_raw()])
-    assert result == {"created": 1, "updated": 0, "unchanged": 0}
+    result, failures = ingest_articles(portal, [_raw()])
+    assert result == {"created": 1, "updated": 0, "unchanged": 0, "failed": 0}
+    assert failures == []
     assert Article.objects.filter(portal=portal).count() == 1
 
 
 def test_ingest_is_idempotent_for_unchanged_content():
     portal = MSTArticlePortal.objects.create(name="Ingest Portal 2")
     ingest_articles(portal, [_raw(content="same body")])
-    result = ingest_articles(portal, [_raw(content="same body")])
-    assert result == {"created": 0, "updated": 0, "unchanged": 1}
+    result, failures = ingest_articles(portal, [_raw(content="same body")])
+    assert result == {"created": 0, "updated": 0, "unchanged": 1, "failed": 0}
+    assert failures == []
     assert Article.objects.filter(portal=portal).count() == 1
 
 
@@ -30,10 +32,11 @@ def test_ingest_updates_content_when_changed_and_bumps_updated_at():
     ingest_articles(portal, [_raw(content="original body")])
     article_before = Article.objects.get(portal=portal)
 
-    result = ingest_articles(portal, [_raw(content="revised body")])
+    result, failures = ingest_articles(portal, [_raw(content="revised body")])
 
     article_after = Article.objects.get(portal=portal)
-    assert result == {"created": 0, "updated": 1, "unchanged": 0}
+    assert result == {"created": 0, "updated": 1, "unchanged": 0, "failed": 0}
+    assert failures == []
     assert article_after.content == "revised body"
     assert article_after.updated_at >= article_before.updated_at
 
@@ -43,9 +46,10 @@ def test_ingest_skips_one_bad_item_without_aborting_the_batch():
     good = _raw(title="Good story", url="https://example.com/good")
     bad = RawArticle(title="", source_url="https://example.com/bad", content="x", image_url=None, published_at=None, category_name=None)
 
-    result = ingest_articles(portal, [bad, good])
+    result, failures = ingest_articles(portal, [bad, good])
 
     assert result["created"] == 1
+    assert failures == []
     assert Article.objects.filter(portal=portal, title="Good story").exists()
 
 
@@ -62,9 +66,12 @@ def test_ingest_recovers_from_db_exception_on_one_item_without_aborting_batch(mo
         return original_create(*args, **kwargs)
     mocker.patch.object(Article.objects, "create", side_effect=create_or_raise)
 
-    result = ingest_articles(portal, [good_before, bad, good_after])
+    result, failures = ingest_articles(portal, [good_before, bad, good_after])
 
     assert result["created"] == 2
+    assert result["failed"] == 1
+    assert len(failures) == 1
+    assert failures[0]["source_url"] == "https://example.com/exc-bad"
     assert Article.objects.filter(portal=portal, title="Story before").exists()
     assert Article.objects.filter(portal=portal, title="Story after").exists()
     assert not Article.objects.filter(portal=portal, title="Story that explodes").exists()

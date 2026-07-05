@@ -37,7 +37,8 @@ def ingest_articles(portal, raw_articles) -> dict:
     Runs for both scheduled scrape and on-demand refresh; each item is its
     own transaction so one bad item can't roll back the rest of the batch.
     """
-    counts = {"created": 0, "updated": 0, "unchanged": 0}
+    counts = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
+    failures: list[dict] = []
 
     for raw in raw_articles:
         if not raw.title or not raw.source_url:
@@ -49,7 +50,14 @@ def ingest_articles(portal, raw_articles) -> dict:
                 raw.title = raw.title[:255]
                 raw.source_url = raw.source_url[:2000]
                 key = title_hash(raw.title)
-                existing = Article.objects.filter(hashed_key=key).first()
+                # source_url is the stable identity for "have we already stored this
+                # article" — title can legitimately change on re-fetch (e.g. a scraper
+                # bug fix, or the source editing its headline). Falling back to the
+                # title hash only for URLs we've never seen keeps cross-portal dedup
+                # (same story, different source) without losing re-fetched updates.
+                existing = Article.objects.filter(source_url=raw.source_url).first()
+                if existing is None:
+                    existing = Article.objects.filter(hashed_key=key).first()
 
                 category = None
                 if raw.category_name:
@@ -59,8 +67,10 @@ def ingest_articles(portal, raw_articles) -> dict:
 
                 author = None
                 if raw.author_name:
+                    author_name = raw.author_name.strip()
                     author, _ = MSTAuthor.objects.get_or_create(
-                        name=raw.author_name.strip()
+                        name=author_name,
+                        defaults={"short_name": author_name[:255]},
                     )
 
                 published_at = None
@@ -91,7 +101,10 @@ def ingest_articles(portal, raw_articles) -> dict:
                         author=author,
                         published_at=published_at,
                     )
-                    _attach_tags(article, raw.tags)
+                    tag_names = list(raw.tags)
+                    if category:
+                        tag_names.append(category.name)
+                    _attach_tags(article, tag_names)
                     if raw.image_url:
                         from articles.tasks import process_article_image  # avoids circular import
                         process_article_image.delay(str(article.id), raw.image_url)
@@ -100,10 +113,17 @@ def ingest_articles(portal, raw_articles) -> dict:
 
                 new_hash = content_hash(raw.content)
                 update_fields = ["updated_at"]
-                if existing.content_hash != new_hash:
+                title_changed = existing.title != raw.title
+                content_changed = existing.content_hash != new_hash
+                if title_changed:
+                    existing.title = raw.title
+                    existing.hashed_key = key
+                    update_fields += ["title", "hashed_key"]
+                if content_changed:
                     existing.content = raw.content
                     existing.content_hash = new_hash
                     update_fields += ["content", "content_hash"]
+                if title_changed or content_changed:
                     counts["updated"] += 1
                 else:
                     counts["unchanged"] += 1
@@ -116,17 +136,27 @@ def ingest_articles(portal, raw_articles) -> dict:
                 if published_at and not existing.published_at:
                     existing.published_at = published_at
                     update_fields.append("published_at")
-                existing.save(update_fields=update_fields)
-                _attach_tags(existing, raw.tags)
+                if len(update_fields) > 1:
+                    existing.save(update_fields=update_fields)
+                tag_names = list(raw.tags)
+                if category:
+                    tag_names.append(category.name)
+                _attach_tags(existing, tag_names)
                 # Backfill local image for articles that still carry a remote URL
                 if raw.image_url and existing.thumbnail_url and existing.thumbnail_url.startswith("http"):
                     from articles.tasks import process_article_image
                     process_article_image.delay(str(existing.id), raw.image_url)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to ingest article %r from portal %s", raw.title, portal.name)
+            counts["failed"] += 1
+            failures.append({
+                "title": (raw.title or "")[:200],
+                "source_url": raw.source_url,
+                "error": str(exc),
+            })
             continue
 
     if counts["created"] or counts["updated"]:
         _push_feed_update(created=counts["created"], updated=counts["updated"])
 
-    return counts
+    return counts, failures
