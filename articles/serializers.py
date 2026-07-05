@@ -63,7 +63,7 @@ class ArticleSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = ArticleSource
         fields = [
-            "id", "url", "source_type", "status", "scrape_interval_minutes",
+            "id", "url", "source_type", "parser_mode", "status", "scrape_interval_minutes",
             "last_fetched_at", "last_success_at", "error_message", "portal", "portal_name",
         ]
         read_only_fields = ["status", "last_fetched_at", "last_success_at", "error_message"]

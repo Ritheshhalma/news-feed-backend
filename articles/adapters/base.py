@@ -15,14 +15,37 @@ class RawArticle:
 
 
 class BaseAdapter(ABC):
-    """Shared interface every source adapter (RSS, HTML, ...) implements."""
+    """
+    Contract every source adapter must satisfy.
+
+    Concrete subclasses (RSSAdapter, HTMLAdapter, PlaywrightAdapter) implement
+    two methods:
+
+    fetch(force)  — return articles from self.source.url.
+                    force=False (default): skip URLs already in the database.
+                    force=True: re-fetch and re-extract all discovered URLs.
+
+    validate()    — prove self.source.url is reachable and parseable.
+                    Called once during source onboarding; raises on failure.
+    """
 
     def __init__(self, source=None):
         self.source = source
 
     @abstractmethod
-    def fetch(self) -> list[RawArticle]:
-        """Return raw articles fetched from self.source.url. Must not raise
-        for individual-item parse failures — skip and continue; only raise
-        for fetch-level failures (network error, unparseable feed)."""
+    def fetch(self, force: bool = False) -> list[RawArticle]:
+        """
+        Return raw articles from self.source.url.
+
+        Must not raise for individual item parse failures — skip and continue.
+        Only raise for fetch-level failures (network error, unparseable feed).
+        """
+        ...
+
+    @abstractmethod
+    def validate(self) -> None:
+        """
+        Validate that self.source.url is reachable and returns parseable content.
+        Raises an exception whose message is stored in source.error_message.
+        """
         ...

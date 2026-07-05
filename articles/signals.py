@@ -12,10 +12,15 @@ def register_source_schedule(source: ArticleSource) -> None:
         every=source.scrape_interval_minutes,
         period=IntervalSchedule.MINUTES,
     )
+    task_name = (
+        "articles.tasks.scrape_playwright_source"
+        if source.parser_mode == "js/playwright"
+        else "articles.tasks.scrape_source"
+    )
     PeriodicTask.objects.update_or_create(
         name=f"scrape_source_{source.id}",
         defaults={
-            "task": "articles.tasks.scrape_source",
+            "task": task_name,
             "interval": schedule,
             "args": json.dumps([str(source.id)]),
             "enabled": source.status == "active",

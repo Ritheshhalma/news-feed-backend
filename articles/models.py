@@ -89,10 +89,18 @@ class ArticleSource(models.Model):
         ("active", "Active"),
         ("failed", "Failed"),
     ]
+    PARSER_MODE_CHOICES = [
+        ("rss",            "RSS Feed (summary only)"),
+        ("rss/multistage", "RSS Feed + Stage 2 full body (trafilatura)"),
+        ("html",           "HTML listing only (card data)"),
+        ("html/multistage","HTML multi-stage (trafilatura)"),
+        ("js/playwright",  "JavaScript / Playwright"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     url = models.CharField(max_length=2048)
     source_type = models.CharField(max_length=10, choices=SOURCE_TYPE_CHOICES)
+    parser_mode = models.CharField(max_length=20, choices=PARSER_MODE_CHOICES, default="rss")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending_validation")
     scrape_interval_minutes = models.PositiveIntegerField(default=30)
     last_fetched_at = models.DateTimeField(null=True, blank=True)
@@ -130,6 +138,7 @@ class SourceFetchLog(models.Model):
     articles_created = models.PositiveIntegerField(default=0)
     articles_updated = models.PositiveIntegerField(default=0)
     articles_unchanged = models.PositiveIntegerField(default=0)
+    articles_failed = models.PositiveIntegerField(default=0)
     error_message = models.TextField(blank=True)
     details = models.JSONField(null=True, blank=True)
 

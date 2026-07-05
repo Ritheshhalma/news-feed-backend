@@ -1,8 +1,15 @@
 from .base import *
 
-# debug_toolbar requires its URL namespace to be mounted — skip it in tests
+# Remove packages that aren't installed in the local test environment
 INSTALLED_APPS = [app for app in INSTALLED_APPS if app != "debug_toolbar"]
-MIDDLEWARE = [m for m in MIDDLEWARE if "debug_toolbar" not in m]
+MIDDLEWARE = [
+    m for m in MIDDLEWARE
+    if "debug_toolbar" not in m and "whitenoise" not in m
+]
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 
 DATABASES = {
     "default": {
