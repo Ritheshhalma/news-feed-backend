@@ -25,8 +25,15 @@ class ArticleViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = ArticleFilter
     lookup_field = "id"
 
-    @method_decorator(cache_page(90))
     def list(self, request, *args, **kwargs):
+        # live_data is computed fresh per-request from ArticleRealTimeState; caching
+        # this response would freeze live prices for up to 90s, so live queries bypass it.
+        if request.query_params.get("is_live", "").lower() in ("true", "1"):
+            return super().list(request, *args, **kwargs)
+        return self._cached_list(request, *args, **kwargs)
+
+    @method_decorator(cache_page(90))
+    def _cached_list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
     @method_decorator(cache_page(90))
